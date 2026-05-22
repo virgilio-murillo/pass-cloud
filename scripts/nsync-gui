@@ -12,22 +12,25 @@ import urllib.request
 VERSION = "1.2.0"
 REMOTE_URL = "https://raw.githubusercontent.com/virgilio-murillo/pass-cloud/main/scripts/nsync-gui"
 CONFIG_FILE = os.path.expanduser("~/.config/nsync/config.json")
-OVERRIDES_FILE = os.path.expanduser("~/.config/nsync/pending_overrides.json")
 _totp_code = None  # cached TOTP for the session
+_my_pending = {}  # path -> value, populated from cloud pending for this device
 
 
-def _load_overrides():
+def _load_my_pending():
+    """Fetch pending items from cloud that were submitted by this device."""
     try:
-        with open(OVERRIDES_FILE) as f:
-            return json.load(f)
+        from nsync import auth, config, sync
+        cfg = config.load()
+        creds = auth.authenticate(cfg)
+        device_id = cfg.get("device_id", "")
+        pending = sync.list_pending(creds, cfg)
+        result = {}
+        for _, p in pending:
+            if p.get("device") == device_id and p.get("action") == "add":
+                result[p["path"]] = p["content"]
+        return result
     except Exception:
         return {}
-
-
-def _save_overrides(overrides):
-    os.makedirs(os.path.dirname(OVERRIDES_FILE), exist_ok=True)
-    with open(OVERRIDES_FILE, "w") as f:
-        json.dump(overrides, f)
 
 
 def _is_trusted():
@@ -86,9 +89,7 @@ def add_entry(path, value):
     """Add entry — value goes via stdin. Returns (ok, msg, is_pending)."""
     out, err, rc = nsync(["add", "--force", path], input_text=value)
     if rc == 0 and not _is_trusted():
-        overrides = _load_overrides()
-        overrides[path] = value
-        _save_overrides(overrides)
+        _my_pending[path] = value
         return True, (out + err).strip(), True
     return rc == 0, (out + err).strip(), False
 
@@ -192,26 +193,9 @@ class TUI:
         if not self.entries and _totp_code:
             _totp_code = None
         self.pending = get_pending() if _is_trusted() else []
-        # Reconcile local overrides
-        overrides = _load_overrides()
-        if overrides:
-            changed = False
-            if _is_trusted():
-                # Trusted: clear if pending is gone
-                pending_paths = {p.get("path") for p in self.pending}
-                for path in list(overrides):
-                    if path not in pending_paths:
-                        del overrides[path]
-                        changed = True
-            else:
-                # Untrusted: clear if store now has the override value (approved)
-                for path in list(overrides):
-                    out, _, rc = nsync(["get", path])
-                    if rc == 0 and out.strip() == overrides[path]:
-                        del overrides[path]
-                        changed = True
-            if changed:
-                _save_overrides(overrides)
+        # Load this device's pending updates from cloud
+        if not _is_trusted():
+            _my_pending.update(_load_my_pending())
         self.msg = f"{len(self.entries)} entries" + (f" | {len(self.pending)} pending!" if self.pending else "")
         self.do_filter()
 
@@ -381,9 +365,8 @@ class TUI:
                 elif key == 10:  # Enter
                     if self.filtered:
                         path = self.filtered[self.sel]
-                        overrides = _load_overrides()
-                        if path in overrides:
-                            self.view_val = overrides[path]
+                        if path in _my_pending:
+                            self.view_val = _my_pending[path]
                             self.view_pending = True
                         else:
                             self.msg = "Loading..."
