@@ -19,7 +19,10 @@ def _type_out(text: str) -> None:
     _t.sleep(0.5)  # give user time to focus target field
     if platform.system() == "Darwin":
         # Escape for AppleScript
-        escaped = text.replace("\\", "\\\\").replace('"', '\\"')
+        escaped = (text.replace("\\", "\\\\")
+                       .replace('"', '\\"')
+                       .replace("\n", "\\n")
+                       .replace("\r", "\\r"))
         subprocess.run(["osascript", "-e",
             f'tell application "System Events" to keystroke "{escaped}"'], check=True)
     else:
@@ -77,7 +80,7 @@ def cmd_setup(args: argparse.Namespace) -> None:
     print("✓ Authenticated. Refresh token cached — no TOTP needed next time.")
 
     # Initialize empty store if none exists
-    remote = sync.pull_store(creds, cfg)
+    remote, etag = sync.pull_store(creds, cfg)
     if remote is None:
         st = store.empty_store(cfg["device_id"])
         sync.push_store(creds, cfg, st)
@@ -91,7 +94,7 @@ def cmd_setup(args: argparse.Namespace) -> None:
 def cmd_get(args: argparse.Namespace) -> None:
     cfg = config.load()
     creds = _get_creds(cfg)
-    remote = sync.pull_store(creds, cfg)
+    remote, etag = sync.pull_store(creds, cfg)
     if remote is None:
         sys.exit("No store found. Run 'nsync setup' first.")
     val = store.get(remote, args.path)
@@ -115,8 +118,9 @@ def cmd_add(args: argparse.Namespace) -> None:
 
     if cfg["trusted"]:
         # Trusted: modify store directly
-        remote = sync.pull_store(creds, cfg) or store.empty_store(cfg["device_id"])
-        if store.get(remote, args.path) is not None:
+        remote, etag = sync.pull_store(creds, cfg)
+        if remote is None: remote = store.empty_store(cfg["device_id"])
+        if store.get(remote, args.path) is not None and not args.force:
             if input(f"'{args.path}' exists. Overwrite? [y/N]: ").strip().lower() != "y":
                 return
         store.add(remote, args.path, content, cfg["device_id"])
@@ -134,7 +138,7 @@ def cmd_rm(args: argparse.Namespace) -> None:
     creds = _get_creds(cfg)
 
     if cfg["trusted"]:
-        remote = sync.pull_store(creds, cfg)
+        remote, etag = sync.pull_store(creds, cfg)
         if remote is None or store.get(remote, args.path) is None:
             sys.exit(f"Entry not found: {args.path}")
         store.remove(remote, args.path, cfg["device_id"])
@@ -149,7 +153,7 @@ def cmd_rm(args: argparse.Namespace) -> None:
 def cmd_ls(args: argparse.Namespace) -> None:
     cfg = config.load()
     creds = _get_creds(cfg)
-    remote = sync.pull_store(creds, cfg)
+    remote, etag = sync.pull_store(creds, cfg)
     if remote is None:
         sys.exit("No store found.")
     for path in store.ls(remote):
@@ -160,7 +164,7 @@ def cmd_pull(args: argparse.Namespace) -> None:
     """Pull and show diff (trusted devices get approval prompt)."""
     cfg = config.load()
     creds = _get_creds(cfg)
-    remote = sync.pull_store(creds, cfg)
+    remote, etag = sync.pull_store(creds, cfg)
     if remote is None:
         print("No remote store found.")
         return
@@ -180,7 +184,9 @@ def cmd_approve(args: argparse.Namespace) -> None:
         print("No pending changes.")
         return
 
-    remote = sync.pull_store(creds, cfg) or store.empty_store(cfg["device_id"])
+    remote, etag = sync.pull_store(creds, cfg)
+    if remote is None:
+        remote = store.empty_store(cfg["device_id"])
 
     for s3_key, p in pending_list:
         print(f"\n--- Pending from {p['device']} at {p['timestamp']} ---")
@@ -217,15 +223,15 @@ def cmd_rotate_key(args: argparse.Namespace) -> None:
         sys.exit("Only trusted devices can rotate keys.")
 
     creds = _get_creds(cfg)
-    remote = sync.pull_store(creds, cfg)
+    remote, etag = sync.pull_store(creds, cfg)
     if remote is None:
         sys.exit("No store found.")
 
     new_key = crypto.generate_key()
+    cfg_new = {**cfg, "cloud_key": new_key}
+    sync.push_store(creds, cfg_new, remote)  # push first — if this fails, nothing changes
     cfg["cloud_key"] = new_key
     config.save(cfg)
-
-    sync.push_store(creds, cfg, remote)
     print(f"✓ Key rotated. New cloud key:\n{new_key}")
     print("\nUpdate ~/.config/nsync/config.json on all other devices with this key.")
 
@@ -238,7 +244,8 @@ def cmd_import_pass(args: argparse.Namespace) -> None:
         sys.exit("Only trusted devices can import from pass.")
 
     creds = _get_creds(cfg)
-    remote = sync.pull_store(creds, cfg) or store.empty_store(cfg["device_id"])
+    remote, etag = sync.pull_store(creds, cfg)
+    if remote is None: remote = store.empty_store(cfg["device_id"])
 
     pass_dir = os.environ.get("PASSWORD_STORE_DIR", os.path.expanduser("~/.password-store"))
     if not os.path.isdir(pass_dir):
@@ -278,6 +285,7 @@ def main() -> None:
 
     a = sub.add_parser("add", help="Add/update an entry")
     a.add_argument("path", help="Entry path")
+    a.add_argument("-f", "--force", action="store_true", help="Overwrite without confirmation")
 
     r = sub.add_parser("rm", help="Remove an entry")
     r.add_argument("path", help="Entry path")

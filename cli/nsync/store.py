@@ -1,7 +1,15 @@
 """JSON store management — entries CRUD + diff."""
 import json
+import re
 import time
 from nsync import crypto
+
+_VALID_PATH = re.compile(r'^[a-zA-Z0-9][a-zA-Z0-9/_@.+-]*$')
+
+
+def _validate_path(path: str) -> None:
+    if not path or '..' in path or not _VALID_PATH.match(path):
+        raise ValueError(f"Invalid entry path: {path!r}")
 
 
 def empty_store(device_id: str = "") -> dict:
@@ -31,11 +39,25 @@ def ls(store: dict) -> list[str]:
 
 
 def add(store: dict, path: str, content: str, device_id: str) -> dict:
+    _validate_path(path)
+    # Version history: save old value before overwrite
+    old = store["entries"].get(path)
+    if old is not None and old != content:
+        if "history" not in store:
+            store["history"] = {}
+        if path not in store["history"]:
+            store["history"][path] = []
+        store["history"][path].append({
+            "value": old,
+            "replaced_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "replaced_by": device_id,
+        })
     store["entries"][path] = content
     return _stamp(store, device_id)
 
 
 def remove(store: dict, path: str, device_id: str) -> dict:
+    _validate_path(path)
     store["entries"].pop(path, None)
     return _stamp(store, device_id)
 
