@@ -12,8 +12,22 @@ import urllib.request
 VERSION = "1.2.0"
 REMOTE_URL = "https://raw.githubusercontent.com/virgilio-murillo/pass-cloud/main/scripts/nsync-gui"
 CONFIG_FILE = os.path.expanduser("~/.config/nsync/config.json")
+OVERRIDES_FILE = os.path.expanduser("~/.config/nsync/pending_overrides.json")
 _totp_code = None  # cached TOTP for the session
-_local_overrides = {}  # path -> value for pending updates on untrusted devices
+
+
+def _load_overrides():
+    try:
+        with open(OVERRIDES_FILE) as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _save_overrides(overrides):
+    os.makedirs(os.path.dirname(OVERRIDES_FILE), exist_ok=True)
+    with open(OVERRIDES_FILE, "w") as f:
+        json.dump(overrides, f)
 
 
 def _is_trusted():
@@ -72,7 +86,9 @@ def add_entry(path, value):
     """Add entry — value goes via stdin. Returns (ok, msg, is_pending)."""
     out, err, rc = nsync(["add", "--force", path], input_text=value)
     if rc == 0 and not _is_trusted():
-        _local_overrides[path] = value
+        overrides = _load_overrides()
+        overrides[path] = value
+        _save_overrides(overrides)
         return True, (out + err).strip(), True
     return rc == 0, (out + err).strip(), False
 
@@ -176,12 +192,16 @@ class TUI:
         if not self.entries and _totp_code:
             _totp_code = None
         self.pending = get_pending()
-        # Reconcile local overrides: clear if approved (store matches) or rejected (pending gone, store differs)
+        # Reconcile local overrides: clear if pending is gone (approved or rejected)
         pending_paths = {p.get("path") for p in self.pending}
-        for path in list(_local_overrides):
+        overrides = _load_overrides()
+        changed = False
+        for path in list(overrides):
             if path not in pending_paths:
-                # Pending is gone — either approved or rejected; either way, clear override
-                _local_overrides.pop(path)
+                del overrides[path]
+                changed = True
+        if changed:
+            _save_overrides(overrides)
         self.msg = f"{len(self.entries)} entries" + (f" | {len(self.pending)} pending!" if self.pending else "")
         self.do_filter()
 
@@ -351,8 +371,9 @@ class TUI:
                 elif key == 10:  # Enter
                     if self.filtered:
                         path = self.filtered[self.sel]
-                        if path in _local_overrides:
-                            self.view_val = _local_overrides[path]
+                        overrides = _load_overrides()
+                        if path in overrides:
+                            self.view_val = overrides[path]
                             self.view_pending = True
                         else:
                             self.msg = "Loading..."
