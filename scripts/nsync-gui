@@ -9,10 +9,19 @@ import time
 import threading
 import urllib.request
 
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 REMOTE_URL = "https://raw.githubusercontent.com/virgilio-murillo/pass-cloud/main/scripts/nsync-gui"
 CONFIG_FILE = os.path.expanduser("~/.config/nsync/config.json")
 _totp_code = None  # cached TOTP for the session
+_local_overrides = {}  # path -> value for pending updates on untrusted devices
+
+
+def _is_trusted():
+    try:
+        with open(CONFIG_FILE) as f:
+            return json.load(f).get("trusted", False)
+    except Exception:
+        return False
 
 
 def _needs_totp():
@@ -60,9 +69,12 @@ def get_entries():
     return [l.strip() for l in out.strip().split("\n") if l.strip()] if rc == 0 else []
 
 def add_entry(path, value):
-    """Add entry — value goes via stdin."""
+    """Add entry — value goes via stdin. Returns (ok, msg, is_pending)."""
     out, err, rc = nsync(["add", "--force", path], input_text=value)
-    return rc == 0, (out + err).strip()
+    if rc == 0 and not _is_trusted():
+        _local_overrides[path] = value
+        return True, (out + err).strip(), True
+    return rc == 0, (out + err).strip(), False
 
 def get_pending():
     """Get pending approvals by feeding 'q' to quit."""
@@ -104,6 +116,7 @@ class TUI:
         self.mode = "list"
         self.msg = ""
         self.view_val = ""
+        self.view_pending = False
         self.update_available = None  # (remote_version, content) or None
         self.update_content = None
         curses.curs_set(0)
@@ -163,6 +176,12 @@ class TUI:
         if not self.entries and _totp_code:
             _totp_code = None
         self.pending = get_pending()
+        # Reconcile local overrides: clear if approved (store matches) or rejected (pending gone, store differs)
+        pending_paths = {p.get("path") for p in self.pending}
+        for path in list(_local_overrides):
+            if path not in pending_paths:
+                # Pending is gone — either approved or rejected; either way, clear override
+                _local_overrides.pop(path)
         self.msg = f"{len(self.entries)} entries" + (f" | {len(self.pending)} pending!" if self.pending else "")
         self.do_filter()
 
@@ -243,6 +262,8 @@ class TUI:
     def _draw_view(self, h, w, off=0):
         path = self.filtered[self.sel] if self.filtered else ""
         self.scr.addstr(2+off, 0, f" {path}", curses.A_BOLD)
+        if getattr(self, 'view_pending', False):
+            self.scr.addstr(2+off, len(path)+2, " [pending]", curses.color_pair(2))
         self.scr.addstr(3+off, 0, "─" * min(w, 50), curses.A_DIM)
         lines = self.view_val.split("\n")
         for i, line in enumerate(lines[:h-7]):
@@ -329,12 +350,18 @@ class TUI:
                     self.do_filter()
                 elif key == 10:  # Enter
                     if self.filtered:
-                        self.msg = "Loading..."
-                        self.draw()
-                        out, err, rc = nsync(["get", self.filtered[self.sel]])
-                        self.view_val = out.strip() if rc == 0 else f"Error: {err}"
+                        path = self.filtered[self.sel]
+                        if path in _local_overrides:
+                            self.view_val = _local_overrides[path]
+                            self.view_pending = True
+                        else:
+                            self.msg = "Loading..."
+                            self.draw()
+                            out, err, rc = nsync(["get", path])
+                            self.view_val = out.strip() if rc == 0 else f"Error: {err}"
+                            self.view_pending = False
                         self.mode = "view"
-                        if rc == 0:
+                        if self.view_val and not self.view_val.startswith("Error:"):
                             self.copy_to_clipboard(self.view_val.split("\n")[0])
                             self.msg = "Copied to clipboard!"
                         else:
@@ -361,8 +388,11 @@ class TUI:
                         if val:
                             self.msg = "Updating..."
                             self.draw()
-                            ok, msg = add_entry(path, val)
-                            self.msg = f"Updated '{path}'!" if ok else f"Error: {msg}"
+                            ok, msg, pending = add_entry(path, val)
+                            if ok:
+                                self.msg = f"Submitted '{path}' for approval" if pending else f"Updated '{path}'!"
+                            else:
+                                self.msg = f"Error: {msg}"
                             self.load()
                         else:
                             self.msg = "Cancelled"
@@ -378,8 +408,11 @@ class TUI:
                         self.scr.refresh()
                         val = self.scr.getstr(h-2, 8, w-9).decode().strip()
                         if val:
-                            ok, msg = add_entry(path, val)
-                            self.msg = "Added!" if ok else f"Error: {msg}"
+                            ok, msg, pending = add_entry(path, val)
+                            if ok:
+                                self.msg = "Submitted for approval" if pending else "Added!"
+                            else:
+                                self.msg = f"Error: {msg}"
                             self.load()
                     curses.noecho()
                     curses.curs_set(0)
