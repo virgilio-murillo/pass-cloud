@@ -191,17 +191,27 @@ class TUI:
         self.entries = get_entries()
         if not self.entries and _totp_code:
             _totp_code = None
-        self.pending = get_pending()
-        # Reconcile local overrides: clear if pending is gone (approved or rejected)
-        pending_paths = {p.get("path") for p in self.pending}
+        self.pending = get_pending() if _is_trusted() else []
+        # Reconcile local overrides
         overrides = _load_overrides()
-        changed = False
-        for path in list(overrides):
-            if path not in pending_paths:
-                del overrides[path]
-                changed = True
-        if changed:
-            _save_overrides(overrides)
+        if overrides:
+            changed = False
+            if _is_trusted():
+                # Trusted: clear if pending is gone
+                pending_paths = {p.get("path") for p in self.pending}
+                for path in list(overrides):
+                    if path not in pending_paths:
+                        del overrides[path]
+                        changed = True
+            else:
+                # Untrusted: clear if store now has the override value (approved)
+                for path in list(overrides):
+                    out, _, rc = nsync(["get", path])
+                    if rc == 0 and out.strip() == overrides[path]:
+                        del overrides[path]
+                        changed = True
+            if changed:
+                _save_overrides(overrides)
         self.msg = f"{len(self.entries)} entries" + (f" | {len(self.pending)} pending!" if self.pending else "")
         self.do_filter()
 
