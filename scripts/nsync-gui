@@ -9,7 +9,7 @@ import time
 import threading
 import urllib.request
 
-VERSION = "1.3.0"
+VERSION = "1.3.1"
 REMOTE_URL = "https://raw.githubusercontent.com/virgilio-murillo/pass-cloud/main/scripts/nsync-gui"
 CONFIG_FILE = os.path.expanduser("~/.config/nsync/config.json")
 _totp_code = None  # cached TOTP for the session
@@ -277,7 +277,7 @@ class TUI:
             row += 1
 
         # Footer
-        self.scr.addstr(h-2, 0, " ↑↓/jk:nav  Enter:view  a:add  e:edit  d:del  A:approve  p:pull  U:update  q:quit"[:w-1], curses.A_DIM)
+        self.scr.addstr(h-2, 0, " ↑↓/jk:nav  Enter:view  a:add  u:update  d:del  A:approve  p:pull  U:upgrade  q:quit"[:w-1], curses.A_DIM)
 
     def _draw_view(self, h, w, off=0):
         path = self.filtered[self.sel] if self.filtered else ""
@@ -397,7 +397,7 @@ class TUI:
                         self.sel = 0
                     else:
                         self.msg = "No pending approvals"
-                elif key == ord("e"):
+                elif key == ord("u"):
                     # Update password for selected entry
                     if self.filtered:
                         curses.echo()
