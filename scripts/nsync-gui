@@ -9,7 +9,7 @@ import time
 import threading
 import urllib.request
 
-VERSION = "1.3.2"
+VERSION = "1.4.0"
 REMOTE_URL = "https://raw.githubusercontent.com/virgilio-murillo/pass-cloud/main/scripts/nsync-gui"
 CONFIG_FILE = os.path.expanduser("~/.config/nsync/config.json")
 _totp_code = None  # cached TOTP for the session
@@ -285,7 +285,7 @@ class TUI:
             row += 1
 
         # Footer
-        self.scr.addstr(h-2, 0, " ↑↓:nav  Enter:view  N:new  U:update  D:del  A:approve  P:pull  Q:quit"[:w-1], curses.A_DIM)
+        self.scr.addstr(h-2, 0, " ↑↓:nav  Enter:view  N:new  G:generate  U:update  D:del  A:approve  P:pull  Q:quit"[:w-1], curses.A_DIM)
 
     def _draw_view(self, h, w, off=0):
         path = self.filtered[self.sel] if self.filtered else ""
@@ -463,6 +463,70 @@ class TUI:
                                 self.load()
                     curses.noecho()
                     curses.curs_set(0)
+                elif key == ord("G"):
+                    curses.echo()
+                    curses.curs_set(1)
+                    h, w = self.scr.getmaxyx()
+                    self.scr.clear()
+                    self.scr.addstr(0, 0, " Generate Password", curses.A_BOLD)
+                    self.scr.addstr(1, 0, " Path: " + " " * (w-8))
+                    self.scr.refresh()
+                    path = self.scr.getstr(1, 7, w-8).decode().strip()
+                    if path:
+                        self.scr.addstr(2, 0, " Requirements (or Enter for defaults):")
+                        self.scr.addstr(3, 0, " > " + " " * (w-4))
+                        self.scr.refresh()
+                        reqs = self.scr.getstr(3, 3, w-4).decode().strip()
+                        curses.noecho()
+                        curses.curs_set(0)
+                        if not reqs:
+                            reqs = "at least 16 characters, one uppercase, one lowercase, one digit, one symbol"
+                        self.scr.addstr(5, 0, " Generating...", curses.color_pair(2))
+                        self.scr.refresh()
+                        try:
+                            p = subprocess.run(
+                                [sys.executable, os.path.join(os.path.dirname(os.path.realpath(sys.argv[0])), "nsync-genpass"), reqs],
+                                capture_output=True, text=True, timeout=30)
+                            val = p.stdout.strip()
+                        except Exception as e:
+                            val = ""
+                            self.msg = f"Generation failed: {e}"
+                        if val:
+                            self.scr.addstr(5, 0, f" Generated: {val}" + " " * (w - len(val) - 13), curses.color_pair(1))
+                            self.scr.addstr(7, 0, " Save? [Y/n/r]etry ", curses.A_BOLD)
+                            self.scr.refresh()
+                            ch = self.scr.getch()
+                            if ch == ord("r"):
+                                # Retry generation
+                                self.scr.addstr(5, 0, " Generating..." + " " * (w-15), curses.color_pair(2))
+                                self.scr.refresh()
+                                try:
+                                    p = subprocess.run(
+                                        [sys.executable, os.path.join(os.path.dirname(os.path.realpath(sys.argv[0])), "nsync-genpass"), reqs],
+                                        capture_output=True, text=True, timeout=30)
+                                    val = p.stdout.strip()
+                                except:
+                                    val = ""
+                                if val:
+                                    self.scr.addstr(5, 0, f" Generated: {val}" + " " * (w - len(val) - 13), curses.color_pair(1))
+                                    self.scr.addstr(7, 0, " Save? [Y/n]       ", curses.A_BOLD)
+                                    self.scr.refresh()
+                                    ch = self.scr.getch()
+                            if ch != ord("n"):
+                                ok, msg, pending = add_entry(path, val)
+                                if ok:
+                                    self.copy_to_clipboard(val)
+                                    self.msg = ("Submitted for approval — copied!" if pending
+                                               else "Saved & copied to clipboard!")
+                                else:
+                                    self.msg = f"Error: {msg}"
+                                self.load()
+                            else:
+                                self.msg = "Cancelled"
+                    else:
+                        curses.noecho()
+                        curses.curs_set(0)
+                        self.msg = "Cancelled"
                 elif key == ord("D"):
                     if self.filtered:
                         self.msg = f"Delete '{self.filtered[self.sel]}'? [y/N]"
