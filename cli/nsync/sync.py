@@ -15,14 +15,15 @@ def _s3(creds: dict, region: str):
     )
 
 
-def pull_store(creds: dict, cfg: dict) -> dict | None:
-    """Download and decrypt store.enc. Returns store dict or None if not found."""
+def pull_store(creds: dict, cfg: dict) -> tuple[dict | None, str | None]:
+    """Download and decrypt store.enc. Returns (store_dict, etag) or (None, None)."""
     try:
         resp = _s3(creds, cfg["region"]).get_object(Bucket=cfg["bucket"], Key="store.enc")
-        return store.load_encrypted(resp["Body"].read(), cfg["cloud_key"])
+        etag = resp.get("ETag", "").strip('"')
+        return store.load_encrypted(resp["Body"].read(), cfg["cloud_key"]), etag
     except ClientError as e:
         if e.response["Error"]["Code"] == "NoSuchKey":
-            return None
+            return None, None
         raise
 
 
