@@ -404,41 +404,55 @@ class TUI:
                         curses.curs_set(1)
                         h, w = self.scr.getmaxyx()
                         path = self.filtered[self.sel]
-                        self.scr.addstr(h-3, 0, f" Update [{path}]" + " " * (w-len(path)-10))
-                        self.scr.addstr(h-2, 0, " New value: " + " " * (w-13))
+                        self.scr.addstr(h-4, 0, f" Update [{path}]" + " " * (w-len(path)-10))
+                        self.scr.addstr(h-3, 0, " New value: " + " " * (w-13))
                         self.scr.refresh()
-                        val = self.scr.getstr(h-2, 12, w-13).decode().strip()
-                        curses.noecho()
-                        curses.curs_set(0)
+                        val = self.scr.getstr(h-3, 12, w-13).decode().strip()
                         if val:
-                            self.msg = "Updating..."
-                            self.draw()
-                            ok, msg, pending = add_entry(path, val)
-                            if ok:
-                                self.msg = f"Submitted '{path}' for approval" if pending else f"Updated '{path}'!"
+                            self.scr.addstr(h-2, 0, " Confirm:   " + " " * (w-13))
+                            self.scr.refresh()
+                            confirm = self.scr.getstr(h-2, 12, w-13).decode().strip()
+                            curses.noecho()
+                            curses.curs_set(0)
+                            if confirm != val:
+                                self.msg = "Values don't match — cancelled"
                             else:
-                                self.msg = f"Error: {msg}"
-                            self.load()
+                                self.msg = "Updating..."
+                                self.draw()
+                                ok, msg, pending = add_entry(path, val)
+                                if ok:
+                                    self.msg = f"Submitted '{path}' for approval" if pending else f"Updated '{path}'!"
+                                else:
+                                    self.msg = f"Error: {msg}"
+                                self.load()
                         else:
+                            curses.noecho()
+                            curses.curs_set(0)
                             self.msg = "Cancelled"
                 elif key == ord("N"):
                     curses.echo()
                     curses.curs_set(1)
                     h, w = self.scr.getmaxyx()
-                    self.scr.addstr(h-3, 0, " Path: " + " " * (w-8))
+                    self.scr.addstr(h-4, 0, " Path: " + " " * (w-8))
                     self.scr.refresh()
-                    path = self.scr.getstr(h-3, 7, w-8).decode().strip()
+                    path = self.scr.getstr(h-4, 7, w-8).decode().strip()
                     if path:
-                        self.scr.addstr(h-2, 0, " Value: " + " " * (w-9))
+                        self.scr.addstr(h-3, 0, " Value: " + " " * (w-9))
                         self.scr.refresh()
-                        val = self.scr.getstr(h-2, 8, w-9).decode().strip()
+                        val = self.scr.getstr(h-3, 8, w-9).decode().strip()
                         if val:
-                            ok, msg, pending = add_entry(path, val)
-                            if ok:
-                                self.msg = "Submitted for approval" if pending else "Added!"
+                            self.scr.addstr(h-2, 0, " Confirm: " + " " * (w-11))
+                            self.scr.refresh()
+                            confirm = self.scr.getstr(h-2, 10, w-11).decode().strip()
+                            if confirm != val:
+                                self.msg = "Values don't match — cancelled"
                             else:
-                                self.msg = f"Error: {msg}"
-                            self.load()
+                                ok, msg, pending = add_entry(path, val)
+                                if ok:
+                                    self.msg = "Submitted for approval" if pending else "Added!"
+                                else:
+                                    self.msg = f"Error: {msg}"
+                                self.load()
                     curses.noecho()
                     curses.curs_set(0)
                 elif key == ord("D"):

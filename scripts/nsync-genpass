@@ -1,0 +1,42 @@
+#!/usr/bin/env python3
+"""Generate a random password from requirements using an LLM (Bedrock Claude)."""
+import json
+import sys
+import boto3
+
+PROMPT = """Generate exactly ONE random password that satisfies ALL of the following requirements.
+Output ONLY the password, nothing else — no explanation, no quotes, no markdown.
+
+Requirements:
+{requirements}"""
+
+
+def main():
+    if sys.stdin.isatty() and len(sys.argv) < 2:
+        print("Usage: nsync-genpass <requirements-text>", file=sys.stderr)
+        print("   or: echo 'requirements' | nsync-genpass", file=sys.stderr)
+        sys.exit(1)
+
+    requirements = " ".join(sys.argv[1:]) if len(sys.argv) > 1 else sys.stdin.read().strip()
+    if not requirements:
+        sys.exit("No requirements provided")
+
+    client = boto3.client("bedrock-runtime", region_name="us-west-2")
+    resp = client.invoke_model(
+        modelId="us.anthropic.claude-sonnet-4-20250514-v1:0",
+        contentType="application/json",
+        accept="application/json",
+        body=json.dumps({
+            "anthropic_version": "bedrock-2023-05-31",
+            "max_tokens": 100,
+            "temperature": 1.0,
+            "messages": [{"role": "user", "content": PROMPT.format(requirements=requirements)}],
+        }),
+    )
+    result = json.loads(resp["body"].read())
+    password = result["content"][0]["text"].strip()
+    print(password)
+
+
+if __name__ == "__main__":
+    main()
