@@ -9,7 +9,7 @@ import time
 import threading
 import urllib.request
 
-VERSION = "1.2.0"
+VERSION = "1.3.0"
 REMOTE_URL = "https://raw.githubusercontent.com/virgilio-murillo/pass-cloud/main/scripts/nsync-gui"
 CONFIG_FILE = os.path.expanduser("~/.config/nsync/config.json")
 _totp_code = None  # cached TOTP for the session
@@ -82,8 +82,12 @@ def nsync(args, input_text=None):
         return "", str(e), 1
 
 def get_entries():
-    out, _, rc = nsync(["ls"])
-    return [l.strip() for l in out.strip().split("\n") if l.strip()] if rc == 0 else []
+    out, err, rc = nsync(["ls"])
+    if rc != 0:
+        if "cloud_key" in err or "AESGCM" in err:
+            return []  # untrusted device without key — show only pending
+        return []
+    return [l.strip() for l in out.strip().split("\n") if l.strip()]
 
 def add_entry(path, value):
     """Add entry — value goes via stdin. Returns (ok, msg, is_pending)."""
@@ -156,7 +160,7 @@ class TUI:
     def _download_update(self):
         if not self.update_content:
             return
-        script_path = os.path.realpath(sys.argv[0]) if sys.argv[0] else "/Users/murivirg/.local/bin/nsync-gui"
+        script_path = os.path.realpath(sys.argv[0]) if sys.argv[0] else os.path.expanduser("~/.local/bin/nsync-gui")
         try:
             with open(script_path, "w") as f:
                 f.write(self.update_content)
@@ -196,7 +200,10 @@ class TUI:
         # Load this device's pending updates from cloud
         if not _is_trusted():
             _my_pending.update(_load_my_pending())
-        self.msg = f"{len(self.entries)} entries" + (f" | {len(self.pending)} pending!" if self.pending else "")
+        if not self.entries and not _is_trusted():
+            self.msg = f"Untrusted device — add-only mode | {len(_my_pending)} pending"
+        else:
+            self.msg = f"{len(self.entries)} entries" + (f" | {len(self.pending)} pending!" if self.pending else "")
         self.do_filter()
 
     def do_filter(self):
@@ -211,15 +218,14 @@ class TUI:
         self.scr.clear()
         h, w = self.scr.getmaxyx()
 
-        # Update banner
+        # Header with version
         banner_offset = 0
         if self.update_available:
-            banner = f" ⬆ Update available: v{self.update_available} (current: v{VERSION}) — press [D] to download "
+            banner = f" ⬆ v{self.update_available} available — press [U] to update "
             self.scr.addstr(0, 0, banner[:w-1], curses.A_BOLD | curses.color_pair(5))
             banner_offset = 1
 
-        # Header
-        title = " nsync "
+        title = f" nsync v{VERSION} "
         self.scr.addstr(banner_offset, 0, "─" * w, curses.color_pair(4))
         self.scr.addstr(banner_offset, (w - len(title)) // 2, title, curses.A_BOLD | curses.color_pair(4))
 
@@ -271,7 +277,7 @@ class TUI:
             row += 1
 
         # Footer
-        self.scr.addstr(h-2, 0, " ↑↓/jk:nav  Enter:view  a:add  U:update  d:del  A:approve  p:pull  q:quit"[:w-1], curses.A_DIM)
+        self.scr.addstr(h-2, 0, " ↑↓/jk:nav  Enter:view  a:add  e:edit  d:del  A:approve  p:pull  U:update  q:quit"[:w-1], curses.A_DIM)
 
     def _draw_view(self, h, w, off=0):
         path = self.filtered[self.sel] if self.filtered else ""
@@ -317,9 +323,14 @@ class TUI:
             self.draw()
             key = self.scr.getch()
 
-            # Global: download update
-            if key == ord("D") and self.update_available:
-                self._download_update()
+            # Global: update
+            if key == ord("U") and self.update_available:
+                self.msg = f"Update to v{self.update_available}? [y/N]"
+                self.draw()
+                if self.scr.getch() == ord("y"):
+                    self._download_update()
+                else:
+                    self.msg = "Update cancelled"
                 continue
 
             if self.mode == "view":
@@ -386,7 +397,7 @@ class TUI:
                         self.sel = 0
                     else:
                         self.msg = "No pending approvals"
-                elif key == ord("U"):
+                elif key == ord("e"):
                     # Update password for selected entry
                     if self.filtered:
                         curses.echo()
