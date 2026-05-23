@@ -200,8 +200,14 @@ class TUI:
         # Load this device's pending updates from cloud
         if not _is_trusted():
             _my_pending.update(_load_my_pending())
+            # Merge pending entries into the list so they're visible
+            for path in _my_pending:
+                if path not in self.entries:
+                    self.entries.append(path)
         if not self.entries and not _is_trusted():
-            self.msg = f"Untrusted device — add-only mode | {len(_my_pending)} pending"
+            self.msg = f"Untrusted device — add-only mode"
+        elif _my_pending and not _is_trusted():
+            self.msg = f"{len(self.entries)} entries ({len(_my_pending)} pending approval)"
         else:
             self.msg = f"{len(self.entries)} entries" + (f" | {len(self.pending)} pending!" if self.pending else "")
         self.do_filter()
@@ -270,10 +276,12 @@ class TUI:
             if row >= h - 2:
                 break
             idx = start + i
+            pending_mark = " ⏳" if entry in _my_pending else ""
+            label = f"{entry}{pending_mark}"
             if idx == self.sel:
-                self.scr.addstr(row, 0, f" ▸ {entry}"[:w-1], curses.A_BOLD | curses.color_pair(1))
+                self.scr.addstr(row, 0, f" ▸ {label}"[:w-1], curses.A_BOLD | curses.color_pair(1))
             else:
-                self.scr.addstr(row, 0, f"   {entry}"[:w-1])
+                self.scr.addstr(row, 0, f"   {label}"[:w-1])
             row += 1
 
         # Footer
