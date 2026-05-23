@@ -91,8 +91,15 @@ def cmd_setup(args: argparse.Namespace) -> None:
     print("✓ Setup complete.")
 
 
+def _require_cloud_key(cfg: dict) -> None:
+    if not cfg.get("cloud_key"):
+        sys.exit("No cloud_key configured. Untrusted devices cannot read the store.\n"
+                 "Use a trusted device or run 'nsync setup' with the cloud key.")
+
+
 def cmd_get(args: argparse.Namespace) -> None:
     cfg = config.load()
+    _require_cloud_key(cfg)
     creds = _get_creds(cfg)
     remote, etag = sync.pull_store(creds, cfg)
     if remote is None:
@@ -110,6 +117,7 @@ def cmd_get(args: argparse.Namespace) -> None:
 
 def cmd_add(args: argparse.Namespace) -> None:
     cfg = config.load()
+    _require_cloud_key(cfg)
     creds = _get_creds(cfg)
     if not sys.stdin.isatty():
         content = sys.stdin.read().strip()
@@ -135,6 +143,7 @@ def cmd_add(args: argparse.Namespace) -> None:
 
 def cmd_rm(args: argparse.Namespace) -> None:
     cfg = config.load()
+    _require_cloud_key(cfg)
     creds = _get_creds(cfg)
 
     if cfg["trusted"]:
@@ -152,6 +161,7 @@ def cmd_rm(args: argparse.Namespace) -> None:
 
 def cmd_ls(args: argparse.Namespace) -> None:
     cfg = config.load()
+    _require_cloud_key(cfg)
     creds = _get_creds(cfg)
     remote, etag = sync.pull_store(creds, cfg)
     if remote is None:
@@ -163,6 +173,7 @@ def cmd_ls(args: argparse.Namespace) -> None:
 def cmd_pull(args: argparse.Namespace) -> None:
     """Pull and show diff (trusted devices get approval prompt)."""
     cfg = config.load()
+    _require_cloud_key(cfg)
     creds = _get_creds(cfg)
     remote, etag = sync.pull_store(creds, cfg)
     if remote is None:
