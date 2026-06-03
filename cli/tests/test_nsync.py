@@ -543,3 +543,94 @@ class TestAuth:
                         mock_srp_cls.return_value = mock_srp
                         creds = auth.authenticate(cfg)
                         assert creds["AccessKeyId"] == "AK"
+
+
+# ─── editor (--edit) tests ──────────────────────────────────────────────────
+
+class TestEditContent:
+    def test_edit_content_with_content(self):
+        from nsync.cli import _edit_content
+
+        def fake_editor(cmd, shell=True):
+            # Extract path from shell command
+            path = cmd.split('"')[1]
+            with open(path, "w") as f:
+                f.write("line1\nline2\nline3\n")
+            return 0
+
+        with patch("subprocess.call", side_effect=fake_editor):
+            result = _edit_content()
+        assert result == "line1\nline2\nline3"
+
+    def test_edit_content_empty_returns_none(self):
+        from nsync.cli import _edit_content
+
+        with patch("subprocess.call", return_value=0):
+            result = _edit_content()
+        assert result is None
+
+    def test_edit_content_editor_failure_returns_none(self):
+        from nsync.cli import _edit_content
+
+        with patch("subprocess.call", return_value=1):
+            result = _edit_content()
+        assert result is None
+
+    def test_edit_content_respects_editor_env(self):
+        from nsync.cli import _edit_content
+
+        def fake_editor(cmd, shell=True):
+            assert cmd.startswith("nano ")
+            path = cmd.split('"')[1]
+            with open(path, "w") as f:
+                f.write("content")
+            return 0
+
+        with patch.dict(os.environ, {"EDITOR": "nano"}), \
+             patch("subprocess.call", side_effect=fake_editor):
+            result = _edit_content()
+        assert result == "content"
+
+    def test_edit_content_tmpfile_cleaned_up(self):
+        from nsync.cli import _edit_content
+        captured_path = []
+
+        def fake_editor(cmd, shell=True):
+            path = cmd.split('"')[1]
+            captured_path.append(path)
+            with open(path, "w") as f:
+                f.write("secret data")
+            return 0
+
+        with patch("subprocess.call", side_effect=fake_editor):
+            _edit_content()
+        assert not os.path.exists(captured_path[0])
+
+    def test_edit_content_tmpfile_cleaned_on_error(self):
+        from nsync.cli import _edit_content
+        captured_path = []
+
+        def fake_editor(cmd, shell=True):
+            path = cmd.split('"')[1]
+            captured_path.append(path)
+            raise RuntimeError("editor crashed")
+
+        with patch("subprocess.call", side_effect=fake_editor):
+            try:
+                _edit_content()
+            except RuntimeError:
+                pass
+        assert not os.path.exists(captured_path[0])
+
+    def test_edit_content_multiline_preserves_internal_newlines(self):
+        from nsync.cli import _edit_content
+
+        def fake_editor(cmd, shell=True):
+            path = cmd.split('"')[1]
+            with open(path, "w") as f:
+                f.write("user: admin\npass: secret123\nnotes: multi\nline value\n")
+            return 0
+
+        with patch("subprocess.call", side_effect=fake_editor):
+            result = _edit_content()
+        assert result == "user: admin\npass: secret123\nnotes: multi\nline value"

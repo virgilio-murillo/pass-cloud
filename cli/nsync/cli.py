@@ -2,6 +2,7 @@
 """nsync — secure notes sync CLI."""
 import argparse
 import getpass
+import os
 import subprocess
 import sys
 import time
@@ -115,12 +116,34 @@ def cmd_get(args: argparse.Namespace) -> None:
         print(val)
 
 
+def _edit_content() -> str | None:
+    """Open $EDITOR for multiline input. Returns content or None if empty."""
+    import tempfile
+    editor = os.environ.get("EDITOR", "vim")
+    fd, path = tempfile.mkstemp(suffix=".txt", prefix="nsync_")
+    os.close(fd)
+    os.chmod(path, 0o600)
+    try:
+        rc = subprocess.call(f'{editor} "{path}"', shell=True)
+        if rc != 0:
+            return None
+        with open(path) as f:
+            content = f.read()
+        return content.rstrip("\n") if content.strip() else None
+    finally:
+        os.unlink(path)
+
+
 def cmd_add(args: argparse.Namespace) -> None:
     cfg = config.load()
     _require_cloud_key(cfg)
     creds = _get_creds(cfg)
     if not sys.stdin.isatty():
         content = sys.stdin.read().strip()
+    elif args.edit:
+        content = _edit_content()
+        if content is None:
+            sys.exit("Editor returned empty content — aborted.")
     else:
         content = getpass.getpass("Entry value: ")
 
@@ -297,6 +320,7 @@ def main() -> None:
     a = sub.add_parser("add", help="Add/update an entry")
     a.add_argument("path", help="Entry path")
     a.add_argument("-f", "--force", action="store_true", help="Overwrite without confirmation")
+    a.add_argument("-e", "--edit", action="store_true", help="Open $EDITOR for multiline input")
 
     r = sub.add_parser("rm", help="Remove an entry")
     r.add_argument("path", help="Entry path")
