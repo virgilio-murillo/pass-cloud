@@ -9,7 +9,23 @@ import time
 import threading
 import urllib.request
 
-VERSION = "1.4.0"
+def _get_version():
+    try:
+        out = subprocess.check_output(
+            ["git", "describe", "--tags", "--always"],
+            cwd=os.path.dirname(os.path.realpath(__file__)),
+            stderr=subprocess.DEVNULL,
+        ).decode().strip()
+        # "v1.5.0" -> "1.5.0", "v1.5.0-3-gabcdef" -> "1.5.0+3"
+        out = out.lstrip("v")
+        if "-" in out and out[0].isdigit():
+            parts = out.split("-")
+            out = f"{parts[0]}+{parts[1]}"
+        return out
+    except Exception:
+        return "dev"
+
+VERSION = _get_version()
 REMOTE_URL = "https://raw.githubusercontent.com/virgilio-murillo/pass-cloud/main/scripts/nsync-gui"
 CONFIG_FILE = os.path.expanduser("~/.config/nsync/config.json")
 _totp_code = None  # cached TOTP for the session
@@ -323,6 +339,68 @@ class TUI:
             row += 1
         self.scr.addstr(h-2, 0, " [Y]approve all  [Esc]back  [Q]uit"[:w-1], curses.A_DIM)
 
+    def _input_path_fuzzy(self):
+        """Interactive path input with live fuzzy matching and tab-completion."""
+        curses.curs_set(1)
+        curses.noecho()
+        h, w = self.scr.getmaxyx()
+        max_suggestions = min(6, h - 6)
+        if max_suggestions < 1:
+            max_suggestions = 1
+        buf = ""
+        while True:
+            # Clear input + suggestion area
+            for row in range(h-5, h-1):
+                if 0 <= row < h:
+                    self.scr.move(row, 0)
+                    self.scr.clrtoeol()
+            # Draw input line
+            self.scr.addstr(h-5, 0, (" Path: " + buf)[:w-1], curses.A_BOLD)
+            # Find matches
+            matches = []
+            if buf:
+                bl = buf.lower()
+                matches = [e for e in self.entries if bl in e.lower()]
+            # Draw suggestions
+            display = matches[:max_suggestions]
+            for i, m in enumerate(display):
+                row = h - 4 + i
+                if row >= h - 1:
+                    break
+                attr = curses.color_pair(2) if m == buf else curses.A_DIM
+                marker = " ⚠ exists" if m == buf else ""
+                self.scr.addstr(row, 2, f"  {m}{marker}"[:w-3], attr)
+            if not matches and buf:
+                if h - 4 < h - 1:
+                    self.scr.addstr(h-4, 2, "  (new path)", curses.A_DIM)
+            self.scr.move(h-5, min(7 + len(buf), w-1))
+            self.scr.refresh()
+
+            key = self.scr.getch()
+            if key == 10:  # Enter
+                break
+            elif key == 27:  # Esc
+                buf = ""
+                break
+            elif key in (curses.KEY_BACKSPACE, 127, 8):
+                buf = buf[:-1]
+            elif key == 9:  # Tab — complete to longest common prefix
+                if matches:
+                    common = matches[0]
+                    for m in matches[1:]:
+                        while common and not m.startswith(common):
+                            common = common[:-1]
+                    if common and len(common) > len(buf):
+                        buf = common
+            elif 32 <= key <= 126:
+                buf += chr(key)
+        # Clean the suggestion area
+        for row in range(h-5, h-1):
+            if 0 <= row < h:
+                self.scr.move(row, 0)
+                self.scr.clrtoeol()
+        return buf.strip()
+
     def copy_to_clipboard(self, text):
         for cmd in [["xclip", "-selection", "clipboard"], ["pbcopy"]]:
             try:
@@ -420,10 +498,42 @@ class TUI:
                         h, w = self.scr.getmaxyx()
                         path = self.filtered[self.sel]
                         self.scr.addstr(h-4, 0, f" Update [{path}]" + " " * (w-len(path)-10))
-                        self.scr.addstr(h-3, 0, " New value: " + " " * (w-13))
+                        self.scr.addstr(h-3, 0, " New value ('e'=editor): " + " " * (w-26))
                         self.scr.refresh()
-                        val = self.scr.getstr(h-3, 12, w-13).decode().strip()
-                        if val:
+                        val = self.scr.getstr(h-3, 25, w-26).decode().strip()
+                        if val == "e":
+                            curses.noecho()
+                            curses.curs_set(0)
+                            curses.endwin()
+                            editor = os.environ.get("EDITOR", "vim")
+                            import tempfile
+                            fd, tmppath = tempfile.mkstemp(suffix=".txt", prefix="nsync_")
+                            os.close(fd)
+                            os.chmod(tmppath, 0o600)
+                            try:
+                                subprocess.call(f'{editor} "{tmppath}"', shell=True)
+                                with open(tmppath) as f:
+                                    val = f.read().rstrip("\n")
+                            finally:
+                                os.unlink(tmppath)
+                            self.scr = curses.initscr()
+                            curses.noecho()
+                            curses.curs_set(0)
+                            self.scr.keypad(True)
+                            curses.start_color()
+                            curses.use_default_colors()
+                            curses.init_pair(1, curses.COLOR_GREEN, -1)
+                            curses.init_pair(2, curses.COLOR_YELLOW, -1)
+                            curses.init_pair(3, curses.COLOR_RED, -1)
+                            curses.init_pair(4, curses.COLOR_CYAN, -1)
+                            curses.init_pair(5, curses.COLOR_MAGENTA, -1)
+                            if val.strip():
+                                ok, msg, pending = add_entry(path, val)
+                                self.msg = (f"Submitted '{path}' for approval" if pending else f"Updated '{path}'!") if ok else f"Error: {msg}"
+                                self.load()
+                            else:
+                                self.msg = "Empty — cancelled"
+                        elif val:
                             self.scr.addstr(h-2, 0, " Confirm:   " + " " * (w-13))
                             self.scr.refresh()
                             confirm = self.scr.getstr(h-2, 12, w-13).decode().strip()
@@ -445,17 +555,47 @@ class TUI:
                             curses.curs_set(0)
                             self.msg = "Cancelled"
                 elif key == ord("N"):
+                    h, w = self.scr.getmaxyx()
+                    path = self._input_path_fuzzy()
                     curses.echo()
                     curses.curs_set(1)
-                    h, w = self.scr.getmaxyx()
-                    self.scr.addstr(h-5, 0, " Path: " + " " * (w-8))
-                    self.scr.refresh()
-                    path = self.scr.getstr(h-5, 7, w-8).decode().strip()
                     if path:
-                        self.scr.addstr(h-4, 0, " Value (or 'g' to generate): " + " " * (w-30))
+                        self.scr.addstr(h-4, 0, " Value ('g'=generate, 'e'=editor): " + " " * (w-36))
                         self.scr.refresh()
-                        val = self.scr.getstr(h-4, 29, w-30).decode().strip()
-                        if val == "g":
+                        val = self.scr.getstr(h-4, 35, w-36).decode().strip()
+                        if val == "e":
+                            curses.noecho()
+                            curses.curs_set(0)
+                            curses.endwin()
+                            editor = os.environ.get("EDITOR", "vim")
+                            import tempfile
+                            fd, tmppath = tempfile.mkstemp(suffix=".txt", prefix="nsync_")
+                            os.close(fd)
+                            os.chmod(tmppath, 0o600)
+                            try:
+                                subprocess.call(f'{editor} "{tmppath}"', shell=True)
+                                with open(tmppath) as f:
+                                    val = f.read().rstrip("\n")
+                            finally:
+                                os.unlink(tmppath)
+                            self.scr = curses.initscr()
+                            curses.noecho()
+                            curses.curs_set(0)
+                            self.scr.keypad(True)
+                            curses.start_color()
+                            curses.use_default_colors()
+                            curses.init_pair(1, curses.COLOR_GREEN, -1)
+                            curses.init_pair(2, curses.COLOR_YELLOW, -1)
+                            curses.init_pair(3, curses.COLOR_RED, -1)
+                            curses.init_pair(4, curses.COLOR_CYAN, -1)
+                            curses.init_pair(5, curses.COLOR_MAGENTA, -1)
+                            if val.strip():
+                                ok, msg, pending = add_entry(path, val)
+                                self.msg = ("Submitted for approval" if pending else "Added!") if ok else f"Error: {msg}"
+                                self.load()
+                            else:
+                                self.msg = "Empty — cancelled"
+                        elif val == "g":
                             self.scr.addstr(h-3, 0, " Requirements (Enter=defaults): " + " " * (w-33))
                             self.scr.refresh()
                             reqs = self.scr.getstr(h-3, 32, w-33).decode().strip()
