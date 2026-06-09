@@ -1,0 +1,46 @@
+{
+  "phase": "complete",
+  "children": {
+    "c1-internet": {
+      "inv_status": "done",
+      "exit_code": -9,
+      "has_findings": false,
+      "val_status": "done",
+      "has_validated": false
+    },
+    "c2-kb": {
+      "inv_status": "done",
+      "exit_code": -9,
+      "has_findings": false,
+      "val_status": "done",
+      "has_validated": false
+    },
+    "c3-context": {
+      "inv_status": "done",
+      "exit_code": -9,
+      "has_findings": false,
+      "val_status": "done",
+      "has_validated": false
+    },
+    "c4-docs": {
+      "inv_status": "done",
+      "exit_code": -9,
+      "has_findings": false,
+      "val_status": "done",
+      "has_validated": false
+    },
+    "c5-internal": {
+      "inv_status": "done",
+      "exit_code": -9,
+      "has_findings": false,
+      "val_status": "done",
+      "has_validated": false
+    }
+  },
+  "orchestrator": "done",
+  "head_agent": "done",
+  "visual": "done",
+  "has_pdf": true,
+  "has_error": false,
+  "findings_count": 27
+}

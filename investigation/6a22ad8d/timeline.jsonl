@@ -1,0 +1,6 @@
+{"ts": 1779678807.862209, "time": "21:13:27", "event": "phase_change", "phase": "investigating"}
+{"ts": 1779678963.0266, "time": "21:16:03", "event": "phase_change", "phase": "orchestrating"}
+{"ts": 1779679173.225385, "time": "21:19:33", "event": "phase_change", "phase": "visualizing"}
+{"ts": 1779679293.3237162, "time": "21:21:33", "event": "pdf_generation_start"}
+{"ts": 1779679302.0647879, "time": "21:21:42", "event": "pdf_generation_done", "exists": true}
+{"ts": 1779679302.0656588, "time": "21:21:42", "event": "phase_change", "phase": "complete"}

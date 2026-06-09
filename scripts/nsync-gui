@@ -504,10 +504,18 @@ class TUI:
                         if val == "e":
                             curses.noecho()
                             curses.curs_set(0)
+                            # Fetch current value to pre-populate editor
+                            if path in _my_pending:
+                                cur_out, cur_rc = _my_pending[path], 0
+                            else:
+                                cur_out, _, cur_rc = nsync(["get", path])
                             curses.endwin()
                             editor = os.environ.get("EDITOR", "vim")
                             import tempfile
                             fd, tmppath = tempfile.mkstemp(suffix=".txt", prefix="nsync_")
+                            if cur_rc == 0 and cur_out.strip():
+                                os.write(fd, (cur_out.strip() + "\n").encode())
+                                os.fsync(fd)
                             os.close(fd)
                             os.chmod(tmppath, 0o600)
                             try:

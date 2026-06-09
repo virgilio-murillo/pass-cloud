@@ -1,0 +1,24 @@
+{
+  "job_id": "6a22ad8d",
+  "description": "## Investigation: Enhance secure-notes-sync-agent\n\n### Project Facts\n- Path: ~/work/github/secure-notes-sync/\n- Language: Python (CLI) + TypeScript (CDK infrastructure)\n- Structure: cli/, infra/, scripts/, README.md\n- Current agent prompt length: ~1344 chars\n\n### Current Agent JSON (verbatim)\n```json\n{\n  \"name\": \"secure-notes-sync-agent\",\n  \"description\": \"Specialized agent for secure-notes-sync (nsync) \u2014 encrypted notes sync via AWS\",\n  \"prompt\": \"You are a specialized developer for the secure-notes-sync (nsync) project.\\n\\nProject: ~/work/github/secure-notes-sync/\\nLanguage: Python (CLI) + TypeScript (CDK infrastructure)\\nPurpose: Sync encrypted notes across devices using AWS (Cognito + S3). Zero-trust architecture \u2014 AWS never sees plaintext. TOTP-only auth.\\n\\n## Key Directories\\n- cli/: Python CLI client (encryption, sync, approval workflow)\\n- infra/: AWS CDK stack (Cognito UserPool + IdentityPool, S3 bucket)\\n- scripts/: Utility scripts\\n\\n## Architecture\\n- S3: stores single AES-256-GCM encrypted blob (store.enc)\\n- Cognito: UserPool (TOTP MFA required) + IdentityPool \u2192 temporary 1hr AWS credentials\\n- Client-side encryption: all data encrypted BEFORE touching AWS\\n- Pending approval: untrusted devices submit changes; trusted device approves\\n- Zero-trust: AWS infrastructure never has access to plaintext\\n\\n## Critical Rules\\n- NEVER store or log plaintext notes\\n- NEVER disable TOTP MFA requirement\\n- Encryption happens client-side ONLY \u2014 server never sees plaintext\\n- AES-256-GCM with unique nonce per encryption\\n\\n## Common Tasks\\n- Deploy infrastructure: cd infra && npm install && npx cdk deploy\\n- Modify CLI: edit cli/ Python code\\n- Modify infrastructure: edit infra/ CDK TypeScript\\n\\n## Build & Run\\n- Infra: cd infra && npm install && npx cdk deploy\\n- CLI: cd cli && pip install -e .\"\n}\n```\n\n### Questions to Answer\n1. What's the actual CLI structure? (commands, encryption implementation)\n2. What CDK resources are deployed?\n3. What's the approval workflow?\n4. What scripts exist?\n5. What are the security-critical code paths?\n6. What should documentation contain?\n\n### Shared Learnings\n- Critical Rules section has highest ROI [seen: 7]\n- Verify factual claims against actual source [seen: 5]",
+  "total_seconds": 494,
+  "phases": {
+    "investigating": "21:13:27",
+    "orchestrating": "21:16:03",
+    "visualizing": "21:19:33",
+    "complete": "21:21:42"
+  },
+  "control_actions": [
+    {
+      "action": "skip_validation",
+      "target": "c5-security"
+    },
+    {
+      "action": "finalize",
+      "target": null
+    }
+  ],
+  "findings_count": 27,
+  "has_report": true,
+  "has_pdf": true
+}

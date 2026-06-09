@@ -1,0 +1,624 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Report</title>
+<style>
+body { font-family: -apple-system, "Segoe UI", Helvetica Neue, sans-serif; font-size: 11pt; line-height: 1.6; color: #1a1a1a; max-width: 960px; margin: 40px auto; padding: 0 20px; background: #fff; }
+h1 { color: #232f3e; font-size: 22pt; border-bottom: 3px solid #ff9900; padding-bottom: 8px; }
+h2 { color: #0073bb; border-bottom: 2px solid #0073bb; padding-bottom: 4px; font-size: 16pt; margin-top: 2em; }
+h3 { color: #232f3e; font-size: 13pt; }
+table { border-collapse: collapse; width: 100%; margin: 12px 0; font-size: 10pt; }
+th { background-color: #232f3e; color: white; padding: 8px; text-align: left; }
+td { border: 1px solid #ddd; padding: 6px 8px; }
+tr:nth-child(even) { background-color: #f8f8f8; }
+code { background: #f0f0f0; padding: 2px 5px; border-radius: 3px; font-size: 10pt; color: #c7254e; }
+pre { background: #1e1e2e; padding: 16px; border-radius: 8px; font-size: 9.5pt; white-space: pre-wrap; word-break: break-word; overflow-x: auto; }
+pre code { background: none; color: #cdd6f4; padding: 0; font-size: inherit; }
+blockquote { border-left: 4px solid #0073bb; margin: 12px 0; padding: 8px 16px; background: #f0f7fc; }
+img { max-width: 100%; height: auto; display: block; margin: 12px auto; }
+.mermaid { background: #fff; padding: 16px; border-radius: 8px; border: 1px solid #e0e0e0; margin: 16px 0; text-align: center; }
+.code-wrapper { position: relative; }
+.copy-btn { position: absolute; top: 8px; right: 8px; background: #3498db; color: #fff; border: none; border-radius: 4px; padding: 4px 10px; font-size: 8pt; cursor: pointer; opacity: 0.7; transition: opacity 0.2s; }
+.copy-btn:hover { opacity: 1; }
+.copy-btn.copied { background: #27ae60; }
+</style>
+</head>
+<body>
+<h1 id="secure-notes-sync-enhancement-report">secure-notes-sync
+Enhancement Report</h1>
+<p><strong>Investigation ID:</strong> 6a22ad8d | <strong>Date:</strong>
+2026-05-24 | <strong>Model:</strong> claude-sonnet-4.6-1m</p>
+<hr />
+<h2 id="executive-summary">Executive Summary</h2>
+<p>The <code>secure-notes-sync</code> (nsync) project is a
+well-architected personal password manager using AES-256-GCM client-side
+encryption, Cognito SRP+TOTP authentication, and temporary STS
+credentials for S3 access. The current agent prompt (~1344 chars) covers
+only the skeleton — direct source inspection revealed <strong>1 active
+crash bug</strong>, <strong>2 security gaps</strong>, <strong>1
+hardcoded region</strong>, and <strong>8+ missing prompt items</strong>
+that would cause the agent to give incorrect guidance or miss entire
+subsystems. The most critical finding is that
+<code>nsync_picker.py</code> (the Spotlight-launchable GUI) crashes
+immediately on launch due to a tuple unpacking bug. All AWS resources
+use deliberate stealth naming (<code>config-sync-*</code>) to avoid
+drawing attention in the AWS console.</p>
+<hr />
+<h2 id="architecture-overview">Architecture Overview</h2>
+<div class="mermaid">
+graph TD
+    subgraph "Client - Trusted Device"
+        CLI["nsync CLI<br/>9 commands"]
+        GUI["nsync-gui<br/>curses TUI v1.4.0"]
+        PICKER["nsync_picker.py<br/>tkinter - BROKEN"]
+        GENPASS["nsync-genpass<br/>Bedrock Claude Sonnet 4"]
+    end
+
+    subgraph "Client - Untrusted Device"
+        CLI_U["nsync CLI<br/>add/rm go to pending"]
+    end
+
+    subgraph "crypto.py"
+        ENC["AES-256-GCM<br/>12-byte nonce<br/>key = cloud_key hex"]
+    end
+
+    subgraph "AWS - config-sync-*"
+        CUP["Cognito UserPool<br/>config-sync-users<br/>TOTP required, 32-char min pwd"]
+        CIP["Cognito IdentityPool<br/>config_sync_identities<br/>no unauthenticated"]
+        S3["S3 Bucket<br/>config-sync-ACCOUNT<br/>SSE-S3, versioned, enforceSSL"]
+        IAM["IAM Role<br/>config-sync-auth-role<br/>grantReadWrite - full bucket"]
+    end
+
+    CLI -->|"SRP + TOTP - IdToken"| CUP
+    CLI_U -->|"SRP + TOTP - IdToken"| CUP
+    CUP -->|"IdToken"| CIP
+    CIP -->|"STS temp creds 1hr"| IAM
+    IAM -->|"s3:GetObject / PutObject"| S3
+
+    CLI -->|"encrypt - store.enc"| ENC
+    ENC -->|"blob"| S3
+    S3 -->|"blob"| ENC
+    ENC -->|"decrypt - JSON"| CLI
+
+    CLI_U -->|"encrypt - pending/ts_device.enc"| S3
+    CLI -->|"nsync approve - decrypt + apply"| S3
+</div>
+<hr />
+<h2 id="cli-commands-reference">CLI Commands Reference</h2>
+<table>
+<colgroup>
+<col style="width: 32%" />
+<col style="width: 25%" />
+<col style="width: 17%" />
+<col style="width: 25%" />
+</colgroup>
+<thead>
+<tr>
+<th>Command</th>
+<th>Flags</th>
+<th style="text-align: center;">Trusted Only</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>setup</code></td>
+<td>—</td>
+<td style="text-align: center;">—</td>
+<td>Interactive first-time setup, caches refresh token</td>
+</tr>
+<tr>
+<td><code>get &lt;path&gt;</code></td>
+<td><code>-c</code> clipboard 45s auto-clear, <code>-t</code> type via
+AppleScript/xdotool</td>
+<td style="text-align: center;">—</td>
+<td></td>
+</tr>
+<tr>
+<td><code>add &lt;path&gt;</code></td>
+<td><code>-f</code> force overwrite</td>
+<td style="text-align: center;">No</td>
+<td>Untrusted → pending/</td>
+</tr>
+<tr>
+<td><code>rm &lt;path&gt;</code></td>
+<td>—</td>
+<td style="text-align: center;">No</td>
+<td>Untrusted → pending/</td>
+</tr>
+<tr>
+<td><code>ls</code></td>
+<td>—</td>
+<td style="text-align: center;">—</td>
+<td>Requires cloud_key</td>
+</tr>
+<tr>
+<td><code>pull</code></td>
+<td>—</td>
+<td style="text-align: center;">—</td>
+<td>Shows entry count + last modified</td>
+</tr>
+<tr>
+<td><code>approve</code></td>
+<td>—</td>
+<td style="text-align: center;"><strong>YES</strong></td>
+<td>Interactive review of pending/ objects</td>
+</tr>
+<tr>
+<td><code>rotate-key</code></td>
+<td>—</td>
+<td style="text-align: center;"><strong>YES</strong></td>
+<td>Re-encrypts store with new key</td>
+</tr>
+<tr>
+<td><code>import-pass</code></td>
+<td>—</td>
+<td style="text-align: center;"><strong>YES</strong></td>
+<td>Walks <code>~/.password-store</code>, decrypts all .gpg</td>
+</tr>
+</tbody>
+</table>
+<h3 id="install-deploy">Install &amp; Deploy</h3>
+<pre class="bash"><code># Install CLI
+cd cli &amp;&amp; pip install -e .
+
+# Deploy infrastructure
+cd infra &amp;&amp; npm install &amp;&amp; npx cdk deploy
+
+# Run tests
+cd cli &amp;&amp; pytest</code></pre>
+<hr />
+<h2 id="approval-workflow-sequence-diagram">Approval Workflow — Sequence
+Diagram</h2>
+<div class="mermaid">
+sequenceDiagram
+    participant UD as Untrusted Device
+    participant S3 as S3 Bucket
+    participant TD as Trusted Device
+
+    UD->>UD: nsync add email/gmail
+    UD->>UD: encrypt pending dict with cloud_key
+    UD->>S3: PUT pending/1716000000_device123.enc
+
+    TD->>S3: nsync approve - LIST pending/ prefix
+    S3-->>TD: [pending/1716000000_device123.enc]
+    TD->>S3: GET pending/1716000000_device123.enc
+    S3-->>TD: encrypted blob
+    TD->>TD: decrypt - show action/path/content diff
+    TD->>TD: user presses y/N/q
+
+    alt Approved
+        TD->>TD: apply change to store
+        TD->>S3: PUT store.enc (updated)
+        TD->>S3: DELETE pending/1716000000_device123.enc
+    else Rejected
+        TD->>S3: DELETE pending/1716000000_device123.enc
+    end
+</div>
+<hr />
+<h2 id="cdk-infrastructure">CDK Infrastructure</h2>
+<table>
+<colgroup>
+<col style="width: 34%" />
+<col style="width: 20%" />
+<col style="width: 44%" />
+</colgroup>
+<thead>
+<tr>
+<th>Resource</th>
+<th>Name</th>
+<th>Key Settings</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Cognito UserPool</td>
+<td><code>config-sync-users</code></td>
+<td>TOTP required, no SMS, no self-signup, 32-char min pwd, no account
+recovery, RETAIN</td>
+</tr>
+<tr>
+<td>App Client</td>
+<td><code>config-sync-cli</code></td>
+<td>SRP auth, no secret, 1hr access/id tokens, 3650-day refresh</td>
+</tr>
+<tr>
+<td>S3 Bucket</td>
+<td><code>config-sync-{account}</code></td>
+<td>SSE-S3, versioned, RETAIN, enforceSSL,
+BlockPublicAccess.BLOCK_ALL</td>
+</tr>
+<tr>
+<td>Identity Pool</td>
+<td><code>config_sync_identities</code></td>
+<td>No unauthenticated identities</td>
+</tr>
+<tr>
+<td>IAM Role</td>
+<td><code>config-sync-auth-role</code></td>
+<td><code>bucket.grantReadWrite(authRole)</code> — full bucket</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p><strong>Stealth naming:</strong> All AWS resources use
+<code>config-sync-*</code> prefix intentionally — not
+<code>nsync-*</code> or <code>password-*</code>.</p>
+</blockquote>
+<hr />
+<h2 id="active-bug-critical">Active Bug — CRITICAL</h2>
+<h3 id="bug-1-nsync_picker.py-crashes-on-launch-typeerror">BUG-1:
+nsync_picker.py crashes on launch (TypeError)</h3>
+<p><strong>File:</strong> <code>cli/nsync_picker.py</code> →
+<code>load_entries()</code></p>
+<pre class="python"><code># BROKEN — sync.pull_store returns (dict|None, str|None) tuple
+def load_entries():
+    cfg = config.load()
+    creds = auth.authenticate(cfg)
+    remote = sync.pull_store(creds, cfg)   # returns TUPLE, not dict
+    if remote is None:                      # tuple is never None
+        return {}
+    return remote[&quot;entries&quot;]               # TypeError: tuple indices must be integers</code></pre>
+<pre class="python"><code># FIX — unpack the tuple
+def load_entries():
+    cfg = config.load()
+    creds = auth.authenticate(cfg)
+    remote, _etag = sync.pull_store(creds, cfg)
+    if remote is None:
+        return {}
+    return remote[&quot;entries&quot;]</code></pre>
+<p><strong>Impact:</strong> The Spotlight-launchable tkinter GUI is
+completely non-functional.</p>
+<hr />
+<h2 id="security-gaps">Security Gaps</h2>
+<h3 id="sec-1-iam-role-full-bucket-access">SEC-1 — IAM Role: Full Bucket
+Access</h3>
+<pre class="typescript"><code>// CURRENT — grants s3:* on entire bucket
+bucket.grantReadWrite(authRole);
+
+// HARDENED — restrict to specific prefixes
+bucket.addToResourcePolicy(new iam.PolicyStatement({
+  principals: [authRole],
+  actions: [&quot;s3:GetObject&quot;, &quot;s3:PutObject&quot;, &quot;s3:DeleteObject&quot;],
+  resources: [bucket.arnForObjects(&quot;store.enc&quot;), bucket.arnForObjects(&quot;pending/*&quot;)],
+}));</code></pre>
+<h3
+id="sec-2-nsync-gui-auto-update-without-signature-verification">SEC-2 —
+nsync-gui: Auto-Update Without Signature Verification</h3>
+<pre class="python"><code># CURRENT — writes raw GitHub content with no integrity check
+with open(script_path, &quot;w&quot;) as f:
+    f.write(self.update_content)
+os.chmod(script_path, 0o755)
+
+# FIX — verify SHA-256 before writing
+import hashlib
+EXPECTED_SHA256 = &quot;&lt;pinned-commit-hash&gt;&quot;
+if hashlib.sha256(content.encode()).hexdigest() != EXPECTED_SHA256:
+    raise ValueError(&quot;Update integrity check failed&quot;)</code></pre>
+<h3 id="sec-3-crypto.py-no-authenticated-associated-data-aad">SEC-3 —
+crypto.py: No Authenticated Associated Data (AAD)</h3>
+<pre class="python"><code># CURRENT — ciphertext not bound to S3 key context
+ct = AESGCM(bytes.fromhex(key_hex)).encrypt(nonce, data, None)
+
+# FIX — bind ciphertext to its S3 location
+ct = AESGCM(bytes.fromhex(key_hex)).encrypt(nonce, data, s3_key.encode())</code></pre>
+<hr />
+<h2 id="other-gaps">Other Gaps</h2>
+<table>
+<colgroup>
+<col style="width: 16%" />
+<col style="width: 20%" />
+<col style="width: 41%" />
+<col style="width: 20%" />
+</colgroup>
+<thead>
+<tr>
+<th>ID</th>
+<th>Gap</th>
+<th style="text-align: center;">Severity</th>
+<th>Fix</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>GAP-2</td>
+<td><code>nsync-genpass</code> hardcodes
+<code>region_name='us-west-2'</code> for Bedrock</td>
+<td style="text-align: center;">Medium</td>
+<td>Use <code>cfg['region']</code></td>
+</tr>
+<tr>
+<td>GAP-3</td>
+<td><code>pass-nsync.bash</code> runs full <code>import-pass</code> on
+every change</td>
+<td style="text-align: center;">Low</td>
+<td>Delta-sync approach</td>
+</tr>
+<tr>
+<td>GAP-4</td>
+<td><code>push_store</code> ignores ETag — silent race condition on
+concurrent writes</td>
+<td style="text-align: center;">Medium</td>
+<td>Use <code>If-Match: &lt;etag&gt;</code> on PutObject</td>
+</tr>
+</tbody>
+</table>
+<h3 id="fix-gap-4-conditional-write">Fix GAP-4 — Conditional Write</h3>
+<pre class="bash"><code># S3 conditional write — fails if ETag changed since last pull
+aws s3api put-object --bucket &lt;BUCKET_NAME&gt; --key store.enc --body store.enc --if-match &lt;ETAG&gt;</code></pre>
+<hr />
+<h2 id="troubleshooting-decision-tree">Troubleshooting Decision
+Tree</h2>
+<div class="mermaid">
+flowchart TD
+    START["nsync command fails"] --> AUTH{"Auth error?"}
+
+    AUTH -->|Yes| TOTP{"TOTP code<br/>rejected?"}
+    AUTH -->|No| CREDS{"Credentials<br/>expired?"}
+
+    TOTP -->|Yes| FIX_TOTP["Check system clock sync<br/>TOTP is time-sensitive<br/>ntpdate -u pool.ntp.org"]
+    TOTP -->|No| FIX_USER["Re-run nsync setup<br/>Check config.json exists<br/>at ~/.config/nsync/config.json"]
+
+    CREDS -->|Yes - untrusted device| FIX_UNTR["Re-authenticate<br/>Untrusted devices: 1hr limit<br/>Run nsync get to re-auth"]
+    CREDS -->|No| S3ERR{"S3 error?"}
+
+    S3ERR -->|AccessDenied| FIX_IAM["Check IAM role<br/>config-sync-auth-role<br/>Verify IdentityPool config"]
+    S3ERR -->|NoSuchKey| FIX_SETUP["First time? Run nsync setup<br/>Then nsync add to create store"]
+    S3ERR -->|No| CRYPTO{"Decrypt<br/>failure?"}
+
+    CRYPTO -->|Yes| FIX_KEY["Wrong cloud_key<br/>Must be shared out-of-band<br/>Never transmitted through AWS"]
+    CRYPTO -->|No| PICKER{"nsync_picker<br/>crash?"}
+
+    PICKER -->|Yes| FIX_PICKER["Known BUG-1<br/>Fix load_entries in<br/>cli/nsync_picker.py<br/>Unpack pull_store tuple"]
+    PICKER -->|No| FIX_LOGS["Run with -v flag<br/>Check ~/.config/nsync/config.json<br/>Run: cd cli && pytest"]
+</div>
+<hr />
+<h2 id="scripts-inventory">Scripts Inventory</h2>
+<table>
+<colgroup>
+<col style="width: 20%" />
+<col style="width: 25%" />
+<col style="width: 22%" />
+<col style="width: 32%" />
+</colgroup>
+<thead>
+<tr>
+<th>Script</th>
+<th>Location</th>
+<th>Purpose</th>
+<th>Known Issues</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>nsync-gui</code></td>
+<td><code>scripts/</code></td>
+<td>Curses TUI v1.4.0 — live search, pending approvals</td>
+<td>Auto-update without sig verification (SEC-2)</td>
+</tr>
+<tr>
+<td><code>nsync-genpass</code></td>
+<td><code>scripts/</code></td>
+<td>Bedrock Claude Sonnet 4 password generation</td>
+<td>Hardcoded <code>us-west-2</code> (GAP-2)</td>
+</tr>
+<tr>
+<td><code>nsync-type.sh</code></td>
+<td><code>scripts/</code></td>
+<td>fzf fuzzy picker + xdotool type-out</td>
+<td>—</td>
+</tr>
+<tr>
+<td><code>nsync_picker.py</code></td>
+<td><code>cli/</code></td>
+<td>tkinter GUI, Spotlight-launchable</td>
+<td><strong>BROKEN</strong> — BUG-1</td>
+</tr>
+<tr>
+<td><code>pass-nsync.bash</code></td>
+<td><code>cli/</code></td>
+<td>pass wrapper, auto-syncs on change</td>
+<td>Full re-import on every change (GAP-3)</td>
+</tr>
+<tr>
+<td><code>generate-setup.sh</code></td>
+<td><code>cli/</code></td>
+<td>Generates copy-paste setup commands</td>
+<td>—</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="store-format">Store Format</h2>
+<pre class="json"><code>{
+  &quot;version&quot;: 1,
+  &quot;entries&quot;: { &quot;email/gmail&quot;: &quot;password123&quot; },
+  &quot;metadata&quot;: { &quot;last_modified&quot;: &quot;2026-05-24T21:00:00Z&quot;, &quot;modified_by&quot;: &quot;device_id&quot; },
+  &quot;history&quot;: {
+    &quot;email/gmail&quot;: [
+      { &quot;value&quot;: &quot;old_password&quot;, &quot;replaced_at&quot;: &quot;2026-05-01T10:00:00Z&quot;, &quot;replaced_by&quot;: &quot;device_id&quot; }
+    ]
+  }
+}</code></pre>
+<ul>
+<li>S3 key: <code>store.enc</code> (single encrypted blob)</li>
+<li>Path validation: <code>^[a-zA-Z0-9][a-zA-Z0-9/_@.+-]*$</code> + no
+<code>..</code></li>
+<li>Wire format: <code>nonce(12 bytes) || ciphertext+tag</code></li>
+</ul>
+<hr />
+<h2 id="config-file">Config File</h2>
+<ul>
+<li><strong>Location:</strong>
+<code>~/.config/nsync/config.json</code></li>
+<li><strong>Permissions:</strong> <code>0o600</code> (file),
+<code>0o700</code> (directory)</li>
+<li><strong>Contains:</strong> region, user_pool_id, client_id,
+identity_pool_id, bucket, username, device_password (64-char), cloud_key
+(hex), refresh_token, device_id, trusted (bool), auth_timestamp</li>
+</ul>
+<blockquote>
+<p><strong>Critical:</strong> <code>cloud_key</code> must be shared
+out-of-band to new devices — it is <strong>never</strong> transmitted
+through AWS.</p>
+</blockquote>
+<hr />
+<h2 id="recommended-action-plan">Recommended Action Plan</h2>
+<table>
+<colgroup>
+<col style="width: 31%" />
+<col style="width: 25%" />
+<col style="width: 18%" />
+<col style="width: 25%" />
+</colgroup>
+<thead>
+<tr>
+<th style="text-align: center;">Priority</th>
+<th>Action</th>
+<th>File</th>
+<th style="text-align: center;">Effort</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td style="text-align: center;">P1</td>
+<td>Fix BUG-1: unpack <code>pull_store</code> tuple</td>
+<td><code>cli/nsync_picker.py</code></td>
+<td style="text-align: center;">1 line</td>
+</tr>
+<tr>
+<td style="text-align: center;">P2</td>
+<td>Scope IAM role to <code>store.enc</code> +
+<code>pending/*</code></td>
+<td><code>infra/lib/stack.ts</code></td>
+<td style="text-align: center;">~10 lines</td>
+</tr>
+<tr>
+<td style="text-align: center;">P2</td>
+<td>Add update signature verification to nsync-gui</td>
+<td><code>scripts/nsync-gui</code></td>
+<td style="text-align: center;">~5 lines</td>
+</tr>
+<tr>
+<td style="text-align: center;">P2</td>
+<td>Add AAD to crypto.py</td>
+<td><code>cli/nsync/crypto.py</code></td>
+<td style="text-align: center;">2 lines</td>
+</tr>
+<tr>
+<td style="text-align: center;">P3</td>
+<td>Fix nsync-genpass hardcoded region</td>
+<td><code>scripts/nsync-genpass</code></td>
+<td style="text-align: center;">1 line</td>
+</tr>
+<tr>
+<td style="text-align: center;">P3</td>
+<td>Add conditional write (If-Match ETag) to push_store</td>
+<td><code>cli/nsync/sync.py</code></td>
+<td style="text-align: center;">~5 lines</td>
+</tr>
+<tr>
+<td style="text-align: center;">P4</td>
+<td>Replace agent prompt with enhanced version</td>
+<td>agent config</td>
+<td style="text-align: center;">—</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="enhanced-agent-prompt">Enhanced Agent Prompt</h2>
+<pre class="json"><code>{
+  &quot;name&quot;: &quot;secure-notes-sync-agent&quot;,
+  &quot;description&quot;: &quot;Specialized agent for secure-notes-sync (nsync) — encrypted notes sync via AWS&quot;,
+  &quot;prompt&quot;: &quot;You are a specialized developer for the secure-notes-sync (nsync) project.\n\nProject: ~/work/github/secure-notes-sync/\nLanguage: Python (CLI) + TypeScript (CDK infrastructure)\nPurpose: Sync encrypted notes/passwords across devices using AWS. Zero-trust — AWS never sees plaintext. TOTP-only auth.\n\n## Key Directories\n- cli/nsync/: Core modules (cli.py, crypto.py, auth.py, store.py, sync.py, config.py)\n- cli/tests/: pytest test suite (545 lines, run: cd cli &amp;&amp; pytest)\n- infra/lib/stack.ts: CDK stack (single file)\n- scripts/: nsync-gui, nsync-genpass, nsync-type.sh\n- cli/: nsync_picker.py, pass-nsync.bash, generate-setup.sh\n\n## CLI Commands (9 total)\n- setup: First-time setup, caches refresh token\n- get &lt;path&gt; [-c clipboard 45s auto-clear] [-t type via AppleScript/xdotool]\n- add &lt;path&gt; [-f force] — stdin or getpass; untrusted devices → pending\n- rm &lt;path&gt; — untrusted devices → pending\n- ls — list all entry paths\n- pull — show store metadata\n- approve — review/apply pending changes (TRUSTED ONLY)\n- rotate-key — re-encrypt store with new key (TRUSTED ONLY)\n- import-pass — import ~/.password-store (TRUSTED ONLY)\n\n## Architecture\n- S3: single AES-256-GCM encrypted blob (store.enc); pending changes at pending/{ts}_{device}.enc\n- Cognito UserPool &#39;config-sync-users&#39;: TOTP MFA required, SRP auth, no self-signup, 32-char min pwd\n- App client &#39;config-sync-cli&#39;: 1hr access/id tokens, 3650-day refresh token (trusted), 1hr enforced (untrusted)\n- IdentityPool → temporary STS credentials (1hr) for all S3 operations\n- Config: ~/.config/nsync/config.json (0o600), dir 0o700\n- Stealth naming: all AWS resources use &#39;config-sync-*&#39; prefix, not &#39;nsync-*&#39;\n\n## Encryption\n- AES-256-GCM via cryptography.hazmat; key = 256-bit hex in config\n- Wire format: nonce(12 bytes) || ciphertext+tag\n- Store format: JSON {version, entries{path:value}, metadata, history}\n- Path validation: regex ^[a-zA-Z0-9][a-zA-Z0-9/_@.+-]*$ + no &#39;..&#39;\n- Version history: previous values saved on overwrite\n\n## Auth Flow\nSRP → PASSWORD_VERIFIER challenge → SOFTWARE_TOKEN_MFA challenge → IdToken\n→ cognito-identity.get_id → get_credentials_for_identity → {AccessKeyId, SecretKey, SessionToken}\nRefresh token cached in config; untrusted devices: auth_timestamp enforced, cleared after 1hr\n\n## Known Bugs\n- nsync_picker.py: load_entries() treats pull_store() result as dict; pull_store returns (dict, etag) tuple → TypeError on launch\n- nsync-genpass: hardcodes region_name=&#39;us-west-2&#39; for Bedrock\n\n## Security Gaps\n- IAM role uses bucket.grantReadWrite(authRole) — full bucket, no path restriction\n- nsync-gui auto-update writes raw GitHub content without hash/signature verification\n- crypto.py passes None as AAD — ciphertext not bound to S3 key context\n\n## Critical Rules\n- NEVER store or log plaintext notes or the cloud_key\n- NEVER disable TOTP MFA requirement\n- Encryption happens client-side ONLY — server never sees plaintext\n- AES-256-GCM with unique nonce per encryption\n- Trusted device changes apply immediately; untrusted device changes go to pending/ for approval\n- The cloud_key must be shared out-of-band to new devices — never transmitted through AWS&quot;
+}</code></pre>
+<hr />
+<h2 id="references">References</h2>
+<table>
+<colgroup>
+<col style="width: 38%" />
+<col style="width: 61%" />
+</colgroup>
+<thead>
+<tr>
+<th>Source</th>
+<th>Contribution</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>cli/nsync/crypto.py</code></td>
+<td>AES-256-GCM implementation, nonce format, AAD gap</td>
+</tr>
+<tr>
+<td><code>cli/nsync/auth.py</code></td>
+<td>SRP+TOTP flow, refresh token handling, trusted/untrusted logic</td>
+</tr>
+<tr>
+<td><code>cli/nsync/sync.py</code></td>
+<td>pull_store tuple return type (source of BUG-1), push_store ETag
+gap</td>
+</tr>
+<tr>
+<td><code>cli/nsync/store.py</code></td>
+<td>Store JSON format, path validation, version history</td>
+</tr>
+<tr>
+<td><code>cli/nsync/config.py</code></td>
+<td>Config file location, permissions, fields</td>
+</tr>
+<tr>
+<td><code>cli/nsync_picker.py</code></td>
+<td>BUG-1 confirmed</td>
+</tr>
+<tr>
+<td><code>infra/lib/stack.ts</code></td>
+<td>CDK resources, stealth naming, IAM scope gap</td>
+</tr>
+<tr>
+<td><code>scripts/nsync-gui</code></td>
+<td>Auto-update without signature verification (SEC-2)</td>
+</tr>
+<tr>
+<td><code>scripts/nsync-genpass</code></td>
+<td>Hardcoded us-west-2 region (GAP-2)</td>
+</tr>
+<tr>
+<td>AWS Docs — Cognito</td>
+<td>SRP auth flow, TOTP MFA, Identity Pool credentials</td>
+</tr>
+<tr>
+<td>AWS Docs — S3</td>
+<td>Conditional writes (If-Match), SSE-S3 vs KMS tradeoffs</td>
+</tr>
+</tbody>
+</table>
+
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+<script>
+mermaid.initialize({ startOnLoad: true, theme: 'default' });
+// Add copy buttons to ALL pre blocks
+document.querySelectorAll('pre').forEach(pre => {
+  if (pre.closest('.mermaid')) return;
+  const wrapper = document.createElement('div');
+  wrapper.className = 'code-wrapper';
+  pre.parentNode.insertBefore(wrapper, pre);
+  wrapper.appendChild(pre);
+  const btn = document.createElement('button');
+  btn.className = 'copy-btn';
+  btn.textContent = 'Copy';
+  btn.onclick = function() {
+    const code = pre.querySelector('code') || pre;
+    navigator.clipboard.writeText(code.textContent).then(() => {
+      btn.textContent = 'Copied!';
+      btn.classList.add('copied');
+      setTimeout(() => { btn.textContent = 'Copy'; btn.classList.remove('copied'); }, 2000);
+    });
+  };
+  wrapper.appendChild(btn);
+});
+</script>
+</body>
+</html>

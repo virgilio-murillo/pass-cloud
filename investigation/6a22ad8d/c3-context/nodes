@@ -1,0 +1,7 @@
+21:13:21|Starting up
+21:13:40|Starting investigation
+21:14:02|Reading CLI source
+21:14:12|Reading infra+scripts
+21:14:32|Reading tests+GUI
+21:14:52|Analyzing security paths
+21:15:06|Writing findings
